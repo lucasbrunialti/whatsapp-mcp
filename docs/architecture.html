@@ -117,6 +117,7 @@ td.wrapmono .mono{white-space:normal}
 .flow.write{border-top-color:var(--go)}
 .flow.media{border-top-color:var(--py)}
 .flow.ingest{border-top-color:var(--edge)}
+.flow.stream{border-top-color:var(--go)}
 .flow h3{margin-bottom:3px}
 .flow .hint{font-family:"JetBrains Mono",monospace; font-size:11.5px; color:var(--muted); margin:0 0 14px}
 ol.steps{list-style:none; counter-reset:s; margin:0; padding:0}
@@ -181,7 +182,7 @@ a{color:var(--go)}
     <div class="fact"><dt>Processos</dt><dd>2</dd></div>
     <div class="fact"><dt>Ferramentas MCP</dt><dd>12</dd></div>
     <div class="fact"><dt>Bancos SQLite</dt><dd>2</dd></div>
-    <div class="fact"><dt>API interna</dt><dd>:8080</dd></div>
+    <div class="fact"><dt>API interna</dt><dd>127.0.0.1:8080</dd></div>
     <div class="fact"><dt>Transporte MCP</dt><dd>stdio</dd></div>
     <div class="fact"><dt>Linhas de código</dt><dd>2.494</dd></div>
   </dl>
@@ -189,7 +190,7 @@ a{color:var(--go)}
 
 <section id="topologia">
   <h2>Topologia</h2>
-  <p class="sub">Quatro atores em cadeia. O único salto que sai da máquina é o do bridge para a infraestrutura do WhatsApp; o agente nunca fala com a rede do WhatsApp e o bridge nunca fala com o agente.</p>
+  <p class="sub">Quatro atores em cadeia, mais um assinante opcional do stream de eventos. O único salto que sai da máquina é o do bridge para a infraestrutura do WhatsApp; o agente nunca fala com a rede do WhatsApp e o bridge nunca fala com o agente.</p>
 
   <div class="diagram">
     <svg viewBox="0 0 1040 462" role="img" aria-labelledby="diagTitle diagDesc">
@@ -279,6 +280,14 @@ a{color:var(--go)}
         <text x="676" y="360" font-size="10.5" fill="var(--muted)">gravada sob demanda</text>
       </g>
 
+      <!-- bridge -> SSE consumer -->
+      <rect x="20" y="206" width="180" height="74" rx="3" fill="var(--surface)" stroke="var(--go)" stroke-opacity=".5" stroke-dasharray="4 3"></rect>
+      <text x="36" y="230" font-size="12.5" font-weight="700" fill="var(--ink)">Consumidor SSE</text>
+      <text x="36" y="248" font-size="10.5" fill="var(--muted)">n8n · script · serviço</text>
+      <text x="36" y="265" font-size="10.5" fill="var(--muted)">fora deste repositório</text>
+      <path d="M620,178 L620,192 L100,192 L100,204" fill="none" stroke="var(--go)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ah-go)"></path>
+      <text x="300" y="186" font-size="10" fill="var(--go)" text-anchor="middle">SSE · GET /api/events</text>
+
       <!-- MCP -> messages.db (read) -->
       <path d="M380,178 L380,264 L350,264 L350,298" fill="none" stroke="var(--store)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ah-db)"></path>
       <text x="368" y="226" font-size="10" fill="var(--store)" text-anchor="end">SELECT direto</text>
@@ -286,11 +295,11 @@ a{color:var(--go)}
 
       <!-- bridge -> messages.db (write) -->
       <path d="M670,178 L670,204 L400,204 L400,298" fill="none" stroke="var(--go)" stroke-width="1.5" marker-end="url(#ah-go)"></path>
-      <text x="535" y="197" font-size="10" fill="var(--go)" text-anchor="middle">INSERT / UPDATE de chats e mensagens</text>
+      <text x="535" y="220" font-size="10" fill="var(--go)" text-anchor="middle">INSERT / UPDATE de chats e mensagens</text>
 
       <!-- bridge -> whatsapp.db -->
       <path d="M670,178 L670,234 L555,234 L555,298" fill="none" stroke="var(--go)" stroke-width="1.5" marker-end="url(#ah-go)"></path>
-      <text x="612" y="227" font-size="10" fill="var(--muted)" text-anchor="middle">sessão</text>
+      <text x="614" y="252" font-size="10" fill="var(--muted)" text-anchor="middle">sessão</text>
 
       <!-- bridge -> media -->
       <path d="M670,178 L670,264 L745,264 L745,298" fill="none" stroke="var(--go)" stroke-width="1.5" marker-end="url(#ah-go)"></path>
@@ -391,6 +400,18 @@ a{color:var(--go)}
       </ol>
     </div>
 
+    <div class="flow stream">
+      <h3>Stream de eventos</h3>
+      <p class="hint">GET /api/events · Server-Sent Events</p>
+      <ol class="steps">
+        <li>O consumidor abre <code>GET /api/events</code>; o handler registra um canal no <code>EventBroker</code> e responde <code>text/event-stream</code>.</li>
+        <li>A cada mensagem persistida, <code>handleMessage</code> chama <code>broker.Publish()</code> e o evento é copiado para todos os canais abertos.</li>
+        <li>O envio é não-bloqueante: assinante com buffer cheio (64 eventos) perde o evento em vez de travar a ingestão.</li>
+        <li>Mensagens próprias são omitidas por padrão; <code>?include_from_me=true</code> as inclui.</li>
+        <li>Comentário <code>: keepalive</code> a cada 25 s; o fechamento da conexão desregistra o assinante.</li>
+      </ol>
+    </div>
+
     <div class="flow ingest">
       <h3>Ingestão</h3>
       <p class="hint">contínua, independente do agente</p>
@@ -445,7 +466,7 @@ a{color:var(--go)}
 
 <section id="interfaces">
   <h2>Superfície de interface</h2>
-  <p class="sub">Duas fronteiras contratuais: o que o agente enxerga (12 tools MCP) e o que o Python fala com o Go (2 endpoints HTTP). A coluna <em>caminho</em> mostra quais tools sequer precisam do bridge de pé.</p>
+  <p class="sub">Duas fronteiras contratuais: o que o agente enxerga (12 tools MCP) e o que o servidor REST expõe (3 endpoints — dois consumidos pelo Python, um pelo mundo externo). A coluna <em>caminho</em> mostra quais tools sequer precisam do bridge de pé.</p>
 
   <div class="tablewrap" style="margin-bottom:22px">
     <table>
@@ -478,6 +499,12 @@ a{color:var(--go)}
           <td>400 sem <code>recipient</code> ou sem conteúdo; 500 em falha de envio.</td>
         </tr>
         <tr>
+          <td class="mono">GET /api/events</td>
+          <td class="wrapmono"><span class="mono">?include_from_me=&lt;bool&gt;</span></td>
+          <td class="wrapmono"><span class="mono">text/event-stream · event: message</span></td>
+          <td>400 se o parâmetro não for booleano; 405 fora de GET.</td>
+        </tr>
+        <tr>
           <td class="mono">POST /api/download</td>
           <td class="wrapmono"><span class="mono">{ message_id, chat_jid }</span></td>
           <td class="wrapmono"><span class="mono">{ success, message, filename, path }</span></td>
@@ -499,6 +526,7 @@ a{color:var(--go)}
         <tr><td class="mono">Pareamento</td><td>QR code half-block no terminal, com timeout de 3 minutos. A sessão persiste em <code>whatsapp.db</code>; reautenticação a cada ~20 dias.</td></tr>
         <tr><td class="mono">Resync</td><td>Não há reconciliação incremental. Fora de sincronia, o procedimento é apagar <code>messages.db</code> e <code>whatsapp.db</code> e parear de novo.</td></tr>
         <tr><td class="mono">Windows</td><td><code>go-sqlite3</code> usa cgo: exige <code>CGO_ENABLED=1</code> e um compilador C instalado.</td></tr>
+        <tr><td class="mono">Eventos</td><td>O stream é best-effort e não persiste nada: assinante desconectado perde o que passou. Para reprocessar, a fonte de verdade é <code>messages.db</code> via <code>list_messages(after=…)</code>.</td></tr>
         <tr><td class="mono">Configuração</td><td>Nenhuma. Porta, caminhos de banco e URL base são constantes no código, dos dois lados.</td></tr>
         <tr><td class="mono">Testes</td><td>Um arquivo, <code>tests/test_mcp_structured_results.py</code>, cobrindo a serialização de dataclasses com a camada <code>whatsapp</code> mockada.</td></tr>
       </tbody>
@@ -512,8 +540,8 @@ a{color:var(--go)}
   <div class="notes">
 
     <div class="note">
-      <div class="sev sev-high">Exposição</div>
-      <p><strong>A API REST não tem autenticação e escuta em todas as interfaces.</strong> <code>startRESTServer</code> monta o endereço como <code>":8080"</code>, não <code>"127.0.0.1:8080"</code>. Qualquer processo local — e qualquer host da mesma rede, num Wi-Fi aberto — pode chamar <code>/api/send</code> e mandar mensagens como você. Correção de uma linha.</p>
+      <div class="sev sev-med">Exposição</div>
+      <p><strong>A API REST continua sem autenticação, agora restrita ao loopback.</strong> O bind passou de <code>":8080"</code> para <code>"127.0.0.1:8080"</code> junto com o stream de eventos — o que fecha o acesso de outros hosts da rede, mas não o de outros processos da sua máquina. Qualquer um deles pode ler <code>/api/events</code> e chamar <code>/api/send</code> como você. Um token compartilhado resolveria.</p>
     </div>
 
     <div class="note">
