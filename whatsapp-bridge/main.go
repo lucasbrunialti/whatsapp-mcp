@@ -13,7 +13,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -409,7 +411,7 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 }
 
 // Handle regular incoming messages with media support
-func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *events.Message, logger waLog.Logger) {
+func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, broker *EventBroker, msg *events.Message, logger waLog.Logger) {
 	// Save message to database
 	chatJID := msg.Info.Chat.String()
 	sender := msg.Info.Sender.User
@@ -454,6 +456,21 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 	if err != nil {
 		logger.Warnf("Failed to store message: %v", err)
 	} else {
+		// Notify anyone listening on /api/events. Only live messages are
+		// published: history sync stores its messages elsewhere, so pairing a
+		// new device does not replay the whole archive onto open streams.
+		broker.Publish(MessageEvent{
+			ID:        msg.Info.ID,
+			ChatJID:   chatJID,
+			ChatName:  name,
+			Sender:    sender,
+			Content:   content,
+			Timestamp: msg.Info.Timestamp,
+			IsFromMe:  msg.Info.IsFromMe,
+			MediaType: mediaType,
+			Filename:  filename,
+		})
+
 		// Log message reception
 		timestamp := msg.Info.Timestamp.Format("2006-01-02 15:04:05")
 		direction := "←"
@@ -675,8 +692,167 @@ func extractDirectPathFromURL(url string) string {
 	return "/" + pathPart
 }
 
+// MessageEvent is the payload published on the /api/events stream for every
+// message the bridge ingests in real time.
+type MessageEvent struct {
+	ID        string    `json:"id"`
+	ChatJID   string    `json:"chat_jid"`
+	ChatName  string    `json:"chat_name"`
+	Sender    string    `json:"sender"`
+	Content   string    `json:"content"`
+	Timestamp time.Time `json:"timestamp"`
+	IsFromMe  bool      `json:"is_from_me"`
+	MediaType string    `json:"media_type,omitempty"`
+	Filename  string    `json:"filename,omitempty"`
+}
+
+// eventBufferSize is how far a slow subscriber may fall behind before the
+// broker starts dropping its events. Dropping keeps a stalled HTTP client from
+// blocking the whatsmeow event handler, which would stop message ingestion.
+const eventBufferSize = 64
+
+// eventKeepAliveInterval is how often an idle stream emits a comment line so
+// the connection is not closed for looking dead.
+const eventKeepAliveInterval = 25 * time.Second
+
+// EventBroker fans each ingested message out to every open SSE subscriber.
+type EventBroker struct {
+	mu          sync.RWMutex
+	nextID      int64
+	subscribers map[int64]chan MessageEvent
+}
+
+func NewEventBroker() *EventBroker {
+	return &EventBroker{subscribers: make(map[int64]chan MessageEvent)}
+}
+
+// Subscribe registers a listener and returns its ID along with the channel to
+// read from. The caller must call Unsubscribe when it goes away.
+func (b *EventBroker) Subscribe() (int64, <-chan MessageEvent) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.nextID++
+	ch := make(chan MessageEvent, eventBufferSize)
+	b.subscribers[b.nextID] = ch
+	return b.nextID, ch
+}
+
+// Unsubscribe removes a listener and closes its channel. It is safe to call
+// more than once for the same ID.
+func (b *EventBroker) Unsubscribe(id int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if ch, ok := b.subscribers[id]; ok {
+		delete(b.subscribers, id)
+		close(ch)
+	}
+}
+
+// Publish delivers the event to every subscriber without ever blocking. A
+// subscriber whose buffer is full misses the event rather than stalling
+// ingestion for everyone else.
+func (b *EventBroker) Publish(evt MessageEvent) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	for _, ch := range b.subscribers {
+		select {
+		case ch <- evt:
+		default:
+		}
+	}
+}
+
+// SubscriberCount reports how many streams are currently open.
+func (b *EventBroker) SubscriberCount() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	return len(b.subscribers)
+}
+
+// newEventStreamHandler serves the live message stream as Server-Sent Events.
+func newEventStreamHandler(broker *EventBroker) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Only allow GET requests
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		// Your own messages are withheld by default so an automation reacting
+		// to this stream does not fire on the echo of what it just sent.
+		includeFromMe := false
+		if raw := r.URL.Query().Get("include_from_me"); raw != "" {
+			parsed, err := strconv.ParseBool(raw)
+			if err != nil {
+				http.Error(w, "include_from_me must be a boolean", http.StatusBadRequest)
+				return
+			}
+			includeFromMe = parsed
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		// Tell any intermediary not to buffer the response.
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+
+		subID, stream := broker.Subscribe()
+		defer broker.Unsubscribe(subID)
+
+		// Announce readiness immediately so the client knows it is attached
+		// even while no message arrives.
+		fmt.Fprint(w, ": connected\n\n")
+		flusher.Flush()
+		fmt.Printf("Event stream opened (%d listening)\n", broker.SubscriberCount())
+
+		keepAlive := time.NewTicker(eventKeepAliveInterval)
+		defer keepAlive.Stop()
+
+		for {
+			select {
+			case <-r.Context().Done():
+				fmt.Println("Event stream closed by client")
+				return
+
+			case <-keepAlive.C:
+				fmt.Fprint(w, ": keepalive\n\n")
+				flusher.Flush()
+
+			case evt, open := <-stream:
+				if !open {
+					return
+				}
+
+				if evt.IsFromMe && !includeFromMe {
+					continue
+				}
+
+				payload, err := json.Marshal(evt)
+				if err != nil {
+					fmt.Printf("Failed to encode event %s: %v\n", evt.ID, err)
+					continue
+				}
+
+				fmt.Fprintf(w, "event: message\nid: %s\ndata: %s\n\n", evt.ID, payload)
+				flusher.Flush()
+			}
+		}
+	}
+}
+
 // Start a REST API server to expose the WhatsApp client functionality
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, broker *EventBroker, port int) {
 	// Handler for sending messages
 	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
@@ -774,8 +950,12 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		})
 	})
 
-	// Start the server
-	serverAddr := fmt.Sprintf(":%d", port)
+	// Handler for the live message event stream
+	http.HandleFunc("/api/events", newEventStreamHandler(broker))
+
+	// Start the server. Bound to the loopback interface: the API has no
+	// authentication, and the event stream exposes message content.
+	serverAddr := fmt.Sprintf("127.0.0.1:%d", port)
 	fmt.Printf("Starting REST API server on %s...\n", serverAddr)
 
 	// Run server in a goroutine so it doesn't block
@@ -834,12 +1014,15 @@ func main() {
 	}
 	defer messageStore.Close()
 
+	// Broker fanning live messages out to /api/events subscribers
+	eventBroker := NewEventBroker()
+
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
 		switch v := evt.(type) {
 		case *events.Message:
 			// Process regular messages
-			handleMessage(client, messageStore, v, logger)
+			handleMessage(client, messageStore, eventBroker, v, logger)
 
 		case *events.HistorySync:
 			// Process history sync events
@@ -906,7 +1089,7 @@ func main() {
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
 	// Start REST API server
-	startRESTServer(client, messageStore, 8080)
+	startRESTServer(client, messageStore, eventBroker, 8080)
 
 	// Create a channel to keep the main goroutine alive
 	exitChan := make(chan os.Signal, 1)

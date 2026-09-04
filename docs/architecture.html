@@ -1,0 +1,579 @@
+<title>WhatsApp MCP Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+:root{
+  --bg:#F4F6F1; --surface:#FFFFFF; --surface-2:#EDF1EA;
+  --ink:#131A16; --ink-2:#39463E; --muted:#5B6A61; --line:#DBE2DA; --line-soft:#E8EDE5;
+  --go:#1E6F4C; --go-soft:#E2F0E8;
+  --py:#A9541B; --py-soft:#F6E9DD;
+  --store:#3B5A8C; --store-soft:#E3E9F3;
+  --edge:#96302A; --edge-soft:#F6E4E1;
+  --shadow:0 1px 2px rgba(19,26,22,.05), 0 8px 24px -14px rgba(19,26,22,.28);
+  color-scheme:light dark;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0D130F; --surface:#151D18; --surface-2:#1B241E;
+    --ink:#E5EBE4; --ink-2:#C2CDC3; --muted:#8DA093; --line:#26332B; --line-soft:#1F2A23;
+    --go:#54BC8A; --go-soft:#152B21;
+    --py:#E29055; --py-soft:#2C2018;
+    --store:#86A8E0; --store-soft:#18202E;
+    --edge:#E08276; --edge-soft:#2C1A18;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 26px -16px rgba(0,0,0,.8);
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0D130F; --surface:#151D18; --surface-2:#1B241E;
+  --ink:#E5EBE4; --ink-2:#C2CDC3; --muted:#8DA093; --line:#26332B; --line-soft:#1F2A23;
+  --go:#54BC8A; --go-soft:#152B21;
+  --py:#E29055; --py-soft:#2C2018;
+  --store:#86A8E0; --store-soft:#18202E;
+  --edge:#E08276; --edge-soft:#2C1A18;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 10px 26px -16px rgba(0,0,0,.8);
+}
+*{box-sizing:border-box}
+body{
+  background:var(--bg); color:var(--ink);
+  font-family:"Source Serif 4",Georgia,"Times New Roman",serif;
+  font-size:16.5px; line-height:1.62; margin:0;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1120px; margin:0 auto; padding:0 28px 96px}
+h1,h2,h3,.mono,.eyebrow,th,.tag,.num{font-family:Archivo,"Helvetica Neue",Arial,sans-serif}
+.mono,code,kbd,.field,.tag,.pill,svg text{font-family:"JetBrains Mono",ui-monospace,"SFMono-Regular",Menlo,monospace}
+
+/* ---------- masthead ---------- */
+header.mast{border-bottom:1px solid var(--line); padding:52px 0 30px; margin-bottom:44px}
+.eyebrow{
+  font-size:11px; font-weight:700; letter-spacing:.18em; text-transform:uppercase;
+  color:var(--muted); margin:0 0 14px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+}
+.eyebrow span.dot{width:5px;height:5px;border-radius:50%;background:var(--go);display:inline-block}
+h1{
+  font-size:clamp(34px,5.4vw,58px); font-weight:700; letter-spacing:-.028em;
+  line-height:1.03; margin:0 0 18px; text-wrap:balance;
+}
+.lede{font-size:19px; color:var(--ink-2); max-width:64ch; margin:0 0 30px}
+.lede b{font-weight:600; color:var(--ink)}
+.facts{display:grid; grid-template-columns:repeat(auto-fit,minmax(148px,1fr)); gap:0; border-top:1px solid var(--line)}
+.fact{padding:16px 20px 14px; border-right:1px solid var(--line)}
+.fact:last-child{border-right:0}
+.fact dt{font-family:Archivo,sans-serif; font-size:10.5px; font-weight:600; letter-spacing:.13em; text-transform:uppercase; color:var(--muted); margin:0 0 4px}
+.fact dd{margin:0; font-family:"JetBrains Mono",monospace; font-size:15px; font-weight:500; color:var(--ink); font-variant-numeric:tabular-nums}
+
+/* ---------- sections ---------- */
+section{margin:0 0 66px; scroll-margin-top:24px}
+h2{
+  font-size:13px; font-weight:700; letter-spacing:.16em; text-transform:uppercase;
+  color:var(--ink); margin:0 0 6px; display:flex; align-items:baseline; gap:12px;
+}
+h2::after{content:""; flex:1; height:1px; background:var(--line)}
+.sub{color:var(--muted); font-size:15.5px; margin:0 0 26px; max-width:66ch}
+h3{font-size:17px; font-weight:600; letter-spacing:-.01em; margin:0 0 8px}
+
+/* ---------- diagram ---------- */
+.diagram{
+  background:var(--surface); border:1px solid var(--line); border-radius:3px;
+  padding:8px; overflow-x:auto; box-shadow:var(--shadow);
+}
+.diagram svg{display:block; min-width:940px; width:100%; height:auto}
+svg text{fill:var(--ink)}
+.legend{
+  display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:16px;
+  font-family:"JetBrains Mono",monospace; font-size:11.5px; color:var(--muted);
+}
+.legend i{display:inline-block; width:22px; height:0; border-top:2px solid currentColor; vertical-align:middle; margin-right:7px}
+.legend .k-mcp{color:var(--py)} .legend .k-http{color:var(--go)} .legend .k-db{color:var(--store)} .legend .k-net{color:var(--edge)}
+
+/* ---------- tables ---------- */
+.tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:3px; background:var(--surface)}
+table{border-collapse:collapse; width:100%; min-width:640px; font-size:14.5px}
+th{
+  font-size:10.5px; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:var(--muted);
+  text-align:left; padding:12px 16px; border-bottom:1px solid var(--line); background:var(--surface-2); white-space:nowrap;
+}
+td{padding:12px 16px; border-bottom:1px solid var(--line-soft); vertical-align:top; color:var(--ink-2)}
+tr:last-child td{border-bottom:0}
+td.mono, td .mono{font-size:13px; color:var(--ink); white-space:nowrap}
+td.wrapmono .mono{white-space:normal}
+.num{font-variant-numeric:tabular-nums; text-align:right; white-space:nowrap}
+
+/* ---------- pills / tags ---------- */
+.pill{
+  display:inline-block; font-size:10.5px; font-weight:500; letter-spacing:.04em;
+  padding:2px 7px; border-radius:2px; white-space:nowrap; border:1px solid transparent;
+}
+.p-go{background:var(--go-soft); color:var(--go); border-color:color-mix(in srgb,var(--go) 26%,transparent)}
+.p-py{background:var(--py-soft); color:var(--py); border-color:color-mix(in srgb,var(--py) 26%,transparent)}
+.p-db{background:var(--store-soft); color:var(--store); border-color:color-mix(in srgb,var(--store) 26%,transparent)}
+.p-edge{background:var(--edge-soft); color:var(--edge); border-color:color-mix(in srgb,var(--edge) 26%,transparent)}
+
+/* ---------- flows ---------- */
+.flows{display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:28px}
+.flow{border-top:2px solid var(--line); padding-top:16px}
+.flow.read{border-top-color:var(--store)}
+.flow.write{border-top-color:var(--go)}
+.flow.media{border-top-color:var(--py)}
+.flow.ingest{border-top-color:var(--edge)}
+.flow.stream{border-top-color:var(--go)}
+.flow h3{margin-bottom:3px}
+.flow .hint{font-family:"JetBrains Mono",monospace; font-size:11.5px; color:var(--muted); margin:0 0 14px}
+ol.steps{list-style:none; counter-reset:s; margin:0; padding:0}
+ol.steps li{
+  counter-increment:s; position:relative; padding:0 0 13px 30px; font-size:14.5px; color:var(--ink-2);
+  border-left:1px solid var(--line); margin-left:8px;
+}
+ol.steps li:last-child{border-left-color:transparent; padding-bottom:0}
+ol.steps li::before{
+  content:counter(s); position:absolute; left:-9px; top:1px;
+  width:17px; height:17px; border-radius:50%; background:var(--surface); border:1px solid var(--line);
+  font-family:"JetBrains Mono",monospace; font-size:9.5px; font-weight:500; color:var(--muted);
+  display:grid; place-items:center;
+}
+ol.steps code{font-size:12.5px; color:var(--ink); background:var(--surface-2); padding:1px 4px; border-radius:2px}
+
+/* ---------- schema ---------- */
+.schemas{display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:22px}
+.schema{background:var(--surface); border:1px solid var(--line); border-radius:3px; overflow:hidden}
+.schema header{
+  padding:12px 16px; border-bottom:1px solid var(--line); background:var(--surface-2);
+  display:flex; justify-content:space-between; align-items:baseline; gap:10px;
+}
+.schema header .name{font-family:"JetBrains Mono",monospace; font-size:13.5px; font-weight:700; color:var(--ink)}
+.schema header .where{font-family:"JetBrains Mono",monospace; font-size:10.5px; color:var(--muted)}
+.fields{margin:0; padding:6px 0}
+.field{display:grid; grid-template-columns:1fr auto; gap:12px; padding:5px 16px; font-size:12.5px; align-items:baseline}
+.field .fn{color:var(--ink)}
+.field .ft{color:var(--muted); font-size:11px; letter-spacing:.03em}
+.field.key .fn::after{content:" PK"; color:var(--store); font-size:9.5px; font-weight:700}
+.field.fk .fn::after{content:" FK"; color:var(--py); font-size:9.5px; font-weight:700}
+.schema footer{padding:11px 16px; border-top:1px solid var(--line-soft); font-size:13px; color:var(--muted)}
+
+/* ---------- notes / risks ---------- */
+.notes{display:grid; gap:1px; background:var(--line); border:1px solid var(--line); border-radius:3px; overflow:hidden}
+.note{background:var(--surface); padding:18px 20px; display:grid; grid-template-columns:96px 1fr; gap:20px}
+.note .sev{font-family:Archivo,sans-serif; font-size:10px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; padding-top:3px}
+.sev-high{color:var(--edge)} .sev-med{color:var(--py)} .sev-low{color:var(--muted)}
+.note p{margin:0; font-size:14.5px; color:var(--ink-2)}
+.note p strong{color:var(--ink); font-weight:600}
+.note code{font-family:"JetBrains Mono",monospace; font-size:12.5px; color:var(--ink); background:var(--surface-2); padding:1px 4px; border-radius:2px}
+
+footer.end{border-top:1px solid var(--line); padding-top:20px; font-size:13px; color:var(--muted)}
+footer.end .mono{font-size:12px}
+a{color:var(--go)}
+:focus-visible{outline:2px solid var(--py); outline-offset:2px}
+@media (max-width:640px){
+  .wrap{padding:0 18px 64px}
+  .note{grid-template-columns:1fr; gap:6px}
+  .fact{border-right:0; border-bottom:1px solid var(--line)}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important; transition:none!important}}
+</style>
+
+<div class="wrap">
+
+<header class="mast">
+  <p class="eyebrow"><span class="dot"></span> Arquitetura do projeto &nbsp;·&nbsp; lucasbrunialti/whatsapp-mcp</p>
+  <h1>WhatsApp MCP</h1>
+  <p class="lede">Dois processos locais que colocam a sua conta pessoal de WhatsApp atrás do Model Context Protocol. Um <b>bridge em Go</b> mantém a sessão multidevice viva e materializa o histórico em SQLite; um <b>servidor MCP em Python</b> lê esse SQLite direto e delega envios ao bridge por HTTP em <code>localhost</code>. Nada trafega para fora da máquina — exceto o que o agente decide ler.</p>
+  <dl class="facts">
+    <div class="fact"><dt>Processos</dt><dd>2</dd></div>
+    <div class="fact"><dt>Ferramentas MCP</dt><dd>12</dd></div>
+    <div class="fact"><dt>Bancos SQLite</dt><dd>2</dd></div>
+    <div class="fact"><dt>API interna</dt><dd>127.0.0.1:8080</dd></div>
+    <div class="fact"><dt>Transporte MCP</dt><dd>stdio</dd></div>
+    <div class="fact"><dt>Linhas de código</dt><dd>2.494</dd></div>
+  </dl>
+</header>
+
+<section id="topologia">
+  <h2>Topologia</h2>
+  <p class="sub">Quatro atores em cadeia, mais um assinante opcional do stream de eventos. O único salto que sai da máquina é o do bridge para a infraestrutura do WhatsApp; o agente nunca fala com a rede do WhatsApp e o bridge nunca fala com o agente.</p>
+
+  <div class="diagram">
+    <svg viewBox="0 0 1040 462" role="img" aria-labelledby="diagTitle diagDesc">
+      <title id="diagTitle">Topologia do WhatsApp MCP</title>
+      <desc id="diagDesc">O cliente de agente conversa por stdio com o servidor MCP em Python, que lê messages.db diretamente e envia comandos por HTTP para o bridge em Go, que por sua vez fala com os servidores do WhatsApp pela biblioteca whatsmeow e escreve nos bancos SQLite locais.</desc>
+
+      <defs>
+        <marker id="ah-py" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--py)"></path>
+        </marker>
+        <marker id="ah-go" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--go)"></path>
+        </marker>
+        <marker id="ah-edge" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--edge)"></path>
+        </marker>
+        <marker id="ah-db" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--store)"></path>
+        </marker>
+      </defs>
+
+      <!-- trust boundary -->
+      <rect x="8" y="56" width="838" height="358" rx="4" fill="none" stroke="var(--muted)" stroke-width="1" stroke-dasharray="5 5" opacity=".55"></rect>
+      <text x="14" y="48" font-size="10.5" letter-spacing="1.4" fill="var(--muted)">SUA MÁQUINA — TUDO LOCAL</text>
+      <text x="1032" y="48" font-size="10.5" letter-spacing="1.4" fill="var(--edge)" text-anchor="end">INFRA DO WHATSAPP</text>
+
+      <!-- row 1 boxes -->
+      <g>
+        <rect x="20" y="90" width="160" height="86" rx="3" fill="var(--surface-2)" stroke="var(--line)"></rect>
+        <text x="36" y="116" font-family="Archivo, sans-serif" font-size="14" font-weight="600" fill="var(--ink)">Agent client</text>
+        <text x="36" y="136" font-size="10.5" fill="var(--muted)">Claude Desktop</text>
+        <text x="36" y="151" font-size="10.5" fill="var(--muted)">ou Cursor</text>
+        <text x="36" y="168" font-size="10" fill="var(--muted)" letter-spacing=".6">mcpServers.whatsapp</text>
+      </g>
+      <g>
+        <rect x="290" y="90" width="180" height="86" rx="3" fill="var(--py-soft)" stroke="var(--py)" stroke-opacity=".45"></rect>
+        <text x="306" y="116" font-family="Archivo, sans-serif" font-size="14" font-weight="600" fill="var(--ink)">MCP server</text>
+        <text x="306" y="136" font-size="10.5" fill="var(--py)">whatsapp-mcp-server/</text>
+        <text x="306" y="151" font-size="10.5" fill="var(--muted)">Python 3.11 · FastMCP</text>
+        <text x="306" y="168" font-size="10" fill="var(--muted)" letter-spacing=".6">12 tools · uv run</text>
+      </g>
+      <g>
+        <rect x="580" y="90" width="180" height="86" rx="3" fill="var(--go-soft)" stroke="var(--go)" stroke-opacity=".45"></rect>
+        <text x="596" y="116" font-family="Archivo, sans-serif" font-size="14" font-weight="600" fill="var(--ink)">WhatsApp bridge</text>
+        <text x="596" y="136" font-size="10.5" fill="var(--go)">whatsapp-bridge/</text>
+        <text x="596" y="151" font-size="10.5" fill="var(--muted)">Go 1.24 · whatsmeow</text>
+        <text x="596" y="168" font-size="10" fill="var(--muted)" letter-spacing=".6">REST + event handlers</text>
+      </g>
+      <g>
+        <rect x="870" y="90" width="150" height="86" rx="3" fill="var(--edge-soft)" stroke="var(--edge)" stroke-opacity=".45"></rect>
+        <text x="886" y="116" font-family="Archivo, sans-serif" font-size="14" font-weight="600" fill="var(--ink)">WhatsApp</text>
+        <text x="886" y="136" font-size="10.5" fill="var(--edge)">Web multidevice</text>
+        <text x="886" y="151" font-size="10.5" fill="var(--muted)">Noise + Signal</text>
+        <text x="886" y="168" font-size="10" fill="var(--muted)" letter-spacing=".6">pareado por QR code</text>
+      </g>
+
+      <!-- row 1 links -->
+      <line x1="182" y1="133" x2="288" y2="133" stroke="var(--py)" stroke-width="1.6" marker-start="url(#ah-py)" marker-end="url(#ah-py)"></line>
+      <text x="235" y="118" font-size="10" fill="var(--py)" text-anchor="middle">MCP · stdio</text>
+      <text x="235" y="152" font-size="10" fill="var(--muted)" text-anchor="middle">JSON-RPC</text>
+
+      <line x1="472" y1="133" x2="578" y2="133" stroke="var(--go)" stroke-width="1.6" marker-end="url(#ah-go)"></line>
+      <text x="525" y="118" font-size="10" fill="var(--go)" text-anchor="middle">HTTP POST</text>
+      <text x="525" y="152" font-size="10" fill="var(--muted)" text-anchor="middle">:8080/api/*</text>
+
+      <line x1="762" y1="133" x2="868" y2="133" stroke="var(--edge)" stroke-width="1.6" marker-start="url(#ah-edge)" marker-end="url(#ah-edge)"></line>
+      <text x="815" y="118" font-size="10" fill="var(--edge)" text-anchor="middle">whatsmeow</text>
+      <text x="815" y="152" font-size="10" fill="var(--muted)" text-anchor="middle">websocket</text>
+
+      <!-- storage boxes -->
+      <g>
+        <rect x="250" y="300" width="200" height="78" rx="3" fill="var(--store-soft)" stroke="var(--store)" stroke-opacity=".4"></rect>
+        <text x="266" y="324" font-size="12.5" font-weight="700" fill="var(--ink)">store/messages.db</text>
+        <text x="266" y="343" font-size="10.5" fill="var(--muted)">tabelas chats + messages</text>
+        <text x="266" y="360" font-size="10.5" fill="var(--muted)">metadados, sem os bytes</text>
+      </g>
+      <g>
+        <rect x="480" y="300" width="150" height="78" rx="3" fill="var(--store-soft)" stroke="var(--store)" stroke-opacity=".4"></rect>
+        <text x="496" y="324" font-size="12.5" font-weight="700" fill="var(--ink)">store/whatsapp.db</text>
+        <text x="496" y="343" font-size="10.5" fill="var(--muted)">sqlstore whatsmeow</text>
+        <text x="496" y="360" font-size="10.5" fill="var(--muted)">device + chaves</text>
+      </g>
+      <g>
+        <rect x="660" y="300" width="170" height="78" rx="3" fill="var(--surface-2)" stroke="var(--line)"></rect>
+        <text x="676" y="324" font-size="12.5" font-weight="700" fill="var(--ink)">store/&lt;chat-jid&gt;/</text>
+        <text x="676" y="343" font-size="10.5" fill="var(--muted)">mídia decriptada</text>
+        <text x="676" y="360" font-size="10.5" fill="var(--muted)">gravada sob demanda</text>
+      </g>
+
+      <!-- bridge -> SSE consumer -->
+      <rect x="20" y="206" width="180" height="74" rx="3" fill="var(--surface)" stroke="var(--go)" stroke-opacity=".5" stroke-dasharray="4 3"></rect>
+      <text x="36" y="230" font-size="12.5" font-weight="700" fill="var(--ink)">Consumidor SSE</text>
+      <text x="36" y="248" font-size="10.5" fill="var(--muted)">n8n · script · serviço</text>
+      <text x="36" y="265" font-size="10.5" fill="var(--muted)">fora deste repositório</text>
+      <path d="M620,178 L620,192 L100,192 L100,204" fill="none" stroke="var(--go)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ah-go)"></path>
+      <text x="300" y="186" font-size="10" fill="var(--go)" text-anchor="middle">SSE · GET /api/events</text>
+
+      <!-- MCP -> messages.db (read) -->
+      <path d="M380,178 L380,264 L350,264 L350,298" fill="none" stroke="var(--store)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ah-db)"></path>
+      <text x="368" y="226" font-size="10" fill="var(--store)" text-anchor="end">SELECT direto</text>
+      <text x="368" y="240" font-size="10" fill="var(--muted)" text-anchor="end">(somente leitura)</text>
+
+      <!-- bridge -> messages.db (write) -->
+      <path d="M670,178 L670,204 L400,204 L400,298" fill="none" stroke="var(--go)" stroke-width="1.5" marker-end="url(#ah-go)"></path>
+      <text x="535" y="220" font-size="10" fill="var(--go)" text-anchor="middle">INSERT / UPDATE de chats e mensagens</text>
+
+      <!-- bridge -> whatsapp.db -->
+      <path d="M670,178 L670,234 L555,234 L555,298" fill="none" stroke="var(--go)" stroke-width="1.5" marker-end="url(#ah-go)"></path>
+      <text x="614" y="252" font-size="10" fill="var(--muted)" text-anchor="middle">sessão</text>
+
+      <!-- bridge -> media -->
+      <path d="M670,178 L670,264 L745,264 L745,298" fill="none" stroke="var(--go)" stroke-width="1.5" marker-end="url(#ah-go)"></path>
+      <text x="752" y="258" font-size="10" fill="var(--muted)">/api/download</text>
+
+      <!-- media path back to MCP as file path -->
+      <text x="520" y="440" font-size="10" fill="var(--muted)" text-anchor="middle">O servidor MCP devolve ao agente o caminho absoluto do arquivo, nunca os bytes.</text>
+    </svg>
+  </div>
+
+  <div class="legend">
+    <span class="k-mcp"><i></i>MCP / stdio</span>
+    <span class="k-http"><i></i>HTTP localhost + escrita SQLite</span>
+    <span class="k-db"><i></i>Leitura SQLite direta</span>
+    <span class="k-net"><i></i>Rede externa (WhatsApp)</span>
+  </div>
+</section>
+
+<section id="componentes">
+  <h2>Componentes</h2>
+  <p class="sub">Quatro arquivos concentram todo o sistema. O bridge é o único componente com estado de rede; o resto é stateless entre chamadas.</p>
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr><th>Arquivo</th><th>Stack</th><th class="num">LoC</th><th>Responsabilidade</th><th>Pontos de entrada</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="mono">whatsapp-bridge/main.go</td>
+          <td><span class="pill p-go">Go 1.24</span></td>
+          <td class="num">1.348</td>
+          <td>Sessão WhatsApp, pareamento por QR, ingestão de mensagens e history sync, persistência em SQLite, download e decriptação de mídia, servidor REST.</td>
+          <td class="wrapmono"><span class="mono">main() · startRESTServer() · handleMessage() · handleHistorySync() · sendWhatsAppMessage() · downloadMedia()</span></td>
+        </tr>
+        <tr>
+          <td class="mono">whatsapp-mcp-server/main.py</td>
+          <td><span class="pill p-py">FastMCP</span></td>
+          <td class="num">269</td>
+          <td>Superfície MCP: declara as 12 tools, documenta argumentos para o modelo e normaliza dataclasses em JSON via <code>_serializable()</code>.</td>
+          <td class="wrapmono"><span class="mono">mcp = FastMCP("whatsapp") · mcp.run(transport="stdio")</span></td>
+        </tr>
+        <tr>
+          <td class="mono">whatsapp-mcp-server/whatsapp.py</td>
+          <td><span class="pill p-py">sqlite3 + requests</span></td>
+          <td class="num">767</td>
+          <td>Camada de acesso: SQL sobre <code>messages.db</code> para todas as leituras, cliente HTTP para as quatro operações que exigem o bridge.</td>
+          <td class="wrapmono"><span class="mono">MESSAGES_DB_PATH · WHATSAPP_API_BASE_URL · Message/Chat/Contact/MessageContext</span></td>
+        </tr>
+        <tr>
+          <td class="mono">whatsapp-mcp-server/audio.py</td>
+          <td><span class="pill p-py">ffmpeg</span></td>
+          <td class="num">110</td>
+          <td>Transcodifica qualquer áudio para Opus/Ogg antes do envio como voice message. Dependência opcional: sem ffmpeg, só <code>send_file</code> funciona.</td>
+          <td class="wrapmono"><span class="mono">convert_to_opus_ogg_temp() → 32k · 24 kHz · VoIP · frames 60 ms</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="fluxos">
+  <h2>Fluxos de execução</h2>
+  <p class="sub">Quatro caminhos distintos. Repare que só um deles nasce no agente e chega ao WhatsApp — os outros três param antes.</p>
+  <div class="flows">
+
+    <div class="flow read">
+      <h3>Leitura</h3>
+      <p class="hint">list_messages · list_chats · search_contacts · +5</p>
+      <ol class="steps">
+        <li>O agente chama a tool por stdio; FastMCP valida os argumentos.</li>
+        <li><code>whatsapp.py</code> abre uma conexão <code>sqlite3</code> nova e monta o SQL com filtros de data, remetente, chat e texto.</li>
+        <li>Com <code>include_context=True</code>, cada linha do resultado dispara uma consulta extra de vizinhança.</li>
+        <li>As linhas viram dataclasses, <code>_serializable()</code> as achata em JSON e o agente recebe a resposta. <b>O bridge não é acionado.</b></li>
+      </ol>
+    </div>
+
+    <div class="flow write">
+      <h3>Envio</h3>
+      <p class="hint">send_message · send_file · send_audio_message</p>
+      <ol class="steps">
+        <li>O agente informa <code>recipient</code> (telefone com DDI ou JID) e o conteúdo.</li>
+        <li>Para áudio não-<code>.ogg</code>, <code>audio.py</code> chama o ffmpeg e grava um temporário Opus.</li>
+        <li><code>POST localhost:8080/api/send</code> com <code>{recipient, message, media_path}</code>.</li>
+        <li>O bridge resolve o JID, faz upload da mídia com <code>client.Upload()</code> e monta o <code>waProto.Message</code> do tipo certo por extensão.</li>
+        <li>Envio pelo whatsmeow; o eco volta como <code>events.Message</code> e é persistido como qualquer outra mensagem.</li>
+      </ol>
+    </div>
+
+    <div class="flow media">
+      <h3>Download de mídia</h3>
+      <p class="hint">download_media</p>
+      <ol class="steps">
+        <li>O agente passa <code>message_id</code> + <code>chat_jid</code>, ambos impressos junto das mensagens com mídia.</li>
+        <li><code>POST /api/download</code>; o bridge lê de <code>messages</code> a URL, a <code>media_key</code> e os dois SHA-256.</li>
+        <li>Se o arquivo já existe em <code>store/&lt;chat-jid&gt;/</code>, retorna o caminho sem tocar na rede.</li>
+        <li>Caso contrário, baixa e decripta via <code>MediaDownloader</code> e grava em disco.</li>
+        <li>Volta o caminho absoluto — os bytes nunca entram no contexto do modelo.</li>
+      </ol>
+    </div>
+
+    <div class="flow stream">
+      <h3>Stream de eventos</h3>
+      <p class="hint">GET /api/events · Server-Sent Events</p>
+      <ol class="steps">
+        <li>O consumidor abre <code>GET /api/events</code>; o handler registra um canal no <code>EventBroker</code> e responde <code>text/event-stream</code>.</li>
+        <li>A cada mensagem persistida, <code>handleMessage</code> chama <code>broker.Publish()</code> e o evento é copiado para todos os canais abertos.</li>
+        <li>O envio é não-bloqueante: assinante com buffer cheio (64 eventos) perde o evento em vez de travar a ingestão.</li>
+        <li>Mensagens próprias são omitidas por padrão; <code>?include_from_me=true</code> as inclui.</li>
+        <li>Comentário <code>: keepalive</code> a cada 25 s; o fechamento da conexão desregistra o assinante.</li>
+      </ol>
+    </div>
+
+    <div class="flow ingest">
+      <h3>Ingestão</h3>
+      <p class="hint">contínua, independente do agente</p>
+      <ol class="steps">
+        <li>O bridge registra um handler único para <code>Message</code>, <code>HistorySync</code>, <code>Connected</code> e <code>LoggedOut</code>.</li>
+        <li>Cada mensagem tem texto e metadados de mídia extraídos; sem nenhum dos dois, é descartada.</li>
+        <li><code>StoreChat()</code> atualiza <code>last_message_time</code> e <code>StoreMessage()</code> faz upsert por <code>(id, chat_jid)</code>.</li>
+        <li>O history sync inicial popula o retroativo — pode levar minutos após o pareamento.</li>
+      </ol>
+    </div>
+
+  </div>
+</section>
+
+<section id="dados">
+  <h2>Modelo de dados</h2>
+  <p class="sub">Dois arquivos SQLite com donos diferentes: <code>messages.db</code> é escrito pelo Go e lido pelos dois lados; <code>whatsapp.db</code> pertence inteiramente à biblioteca whatsmeow. As tabelas são criadas com <code>CREATE TABLE IF NOT EXISTS</code> — não há migrations.</p>
+  <div class="schemas">
+
+    <div class="schema">
+      <header><span class="name">chats</span><span class="where">messages.db</span></header>
+      <div class="fields">
+        <div class="field key"><span class="fn mono">jid</span><span class="ft">TEXT</span></div>
+        <div class="field"><span class="fn mono">name</span><span class="ft">TEXT</span></div>
+        <div class="field"><span class="fn mono">last_message_time</span><span class="ft">TIMESTAMP</span></div>
+      </div>
+      <footer>Sufixo <code>@g.us</code> identifica grupo; <code>@s.whatsapp.net</code>, conversa direta. É também a tabela de contatos — <code>search_contacts</code> consulta aqui filtrando os grupos fora.</footer>
+    </div>
+
+    <div class="schema">
+      <header><span class="name">messages</span><span class="where">messages.db</span></header>
+      <div class="fields">
+        <div class="field key"><span class="fn mono">id</span><span class="ft">TEXT</span></div>
+        <div class="field key fk"><span class="fn mono">chat_jid</span><span class="ft">TEXT</span></div>
+        <div class="field"><span class="fn mono">sender</span><span class="ft">TEXT</span></div>
+        <div class="field"><span class="fn mono">content</span><span class="ft">TEXT</span></div>
+        <div class="field"><span class="fn mono">timestamp</span><span class="ft">TIMESTAMP</span></div>
+        <div class="field"><span class="fn mono">is_from_me</span><span class="ft">BOOLEAN</span></div>
+        <div class="field"><span class="fn mono">media_type</span><span class="ft">TEXT</span></div>
+        <div class="field"><span class="fn mono">filename</span><span class="ft">TEXT</span></div>
+        <div class="field"><span class="fn mono">url</span><span class="ft">TEXT</span></div>
+        <div class="field"><span class="fn mono">media_key</span><span class="ft">BLOB</span></div>
+        <div class="field"><span class="fn mono">file_sha256</span><span class="ft">BLOB</span></div>
+        <div class="field"><span class="fn mono">file_enc_sha256</span><span class="ft">BLOB</span></div>
+        <div class="field"><span class="fn mono">file_length</span><span class="ft">INTEGER</span></div>
+      </div>
+      <footer>As cinco últimas colunas são o material de decriptação, não o arquivo: o banco guarda a chave e os hashes para reconstruir a mídia depois, sob demanda. É o que mantém o <code>.db</code> pequeno mesmo em contas com anos de histórico.</footer>
+    </div>
+
+  </div>
+</section>
+
+<section id="interfaces">
+  <h2>Superfície de interface</h2>
+  <p class="sub">Duas fronteiras contratuais: o que o agente enxerga (12 tools MCP) e o que o servidor REST expõe (3 endpoints — dois consumidos pelo Python, um pelo mundo externo). A coluna <em>caminho</em> mostra quais tools sequer precisam do bridge de pé.</p>
+
+  <div class="tablewrap" style="margin-bottom:22px">
+    <table>
+      <thead><tr><th>Tool MCP</th><th>Caminho</th><th>O que faz</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">search_contacts</td><td><span class="pill p-db">SQLite</span></td><td>Busca contatos por nome ou telefone, excluindo grupos. Limite fixo de 50.</td></tr>
+        <tr><td class="mono">list_messages</td><td><span class="pill p-db">SQLite</span></td><td>Mensagens por data, remetente, chat e texto, com paginação e contexto opcional em volta de cada acerto.</td></tr>
+        <tr><td class="mono">list_chats</td><td><span class="pill p-db">SQLite</span></td><td>Chats com metadados e última mensagem, ordenados por atividade ou nome.</td></tr>
+        <tr><td class="mono">get_chat</td><td><span class="pill p-db">SQLite</span></td><td>Metadados de um chat pelo JID.</td></tr>
+        <tr><td class="mono">get_direct_chat_by_contact</td><td><span class="pill p-db">SQLite</span></td><td>Conversa direta a partir de um número de telefone.</td></tr>
+        <tr><td class="mono">get_contact_chats</td><td><span class="pill p-db">SQLite</span></td><td>Todos os chats em que o contato aparece, inclusive grupos.</td></tr>
+        <tr><td class="mono">get_last_interaction</td><td><span class="pill p-db">SQLite</span></td><td>Mensagem mais recente envolvendo o contato, já formatada.</td></tr>
+        <tr><td class="mono">get_message_context</td><td><span class="pill p-db">SQLite</span></td><td>Janela de N mensagens antes e depois de um ID.</td></tr>
+        <tr><td class="mono">send_message</td><td><span class="pill p-go">Bridge</span></td><td>Texto para telefone ou JID de grupo.</td></tr>
+        <tr><td class="mono">send_file</td><td><span class="pill p-go">Bridge</span></td><td>Imagem, vídeo, áudio bruto ou documento por caminho absoluto.</td></tr>
+        <tr><td class="mono">send_audio_message</td><td><span class="pill p-go">Bridge</span></td><td>Voice message tocável; converte para Opus se necessário.</td></tr>
+        <tr><td class="mono">download_media</td><td><span class="pill p-go">Bridge</span></td><td>Materializa a mídia em disco e devolve o caminho.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Endpoint</th><th>Request</th><th>Response</th><th>Erro</th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="mono">POST /api/send</td>
+          <td class="wrapmono"><span class="mono">{ recipient, message, media_path }</span></td>
+          <td class="wrapmono"><span class="mono">{ success, message }</span></td>
+          <td>400 sem <code>recipient</code> ou sem conteúdo; 500 em falha de envio.</td>
+        </tr>
+        <tr>
+          <td class="mono">GET /api/events</td>
+          <td class="wrapmono"><span class="mono">?include_from_me=&lt;bool&gt;</span></td>
+          <td class="wrapmono"><span class="mono">text/event-stream · event: message</span></td>
+          <td>400 se o parâmetro não for booleano; 405 fora de GET.</td>
+        </tr>
+        <tr>
+          <td class="mono">POST /api/download</td>
+          <td class="wrapmono"><span class="mono">{ message_id, chat_jid }</span></td>
+          <td class="wrapmono"><span class="mono">{ success, message, filename, path }</span></td>
+          <td>400 com campos faltando; 500 em falha de decriptação.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="operacao">
+  <h2>Operação</h2>
+  <p class="sub">O que precisa estar de pé e o que quebra na prática.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Aspecto</th><th>Comportamento</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">Boot</td><td>Os dois processos sobem separados: <code>go run main.go</code> no bridge e o agente iniciando <code>uv run main.py</code> via stdio. As tools de leitura funcionam com o bridge parado — só ficam com dados congelados.</td></tr>
+        <tr><td class="mono">Pareamento</td><td>QR code half-block no terminal, com timeout de 3 minutos. A sessão persiste em <code>whatsapp.db</code>; reautenticação a cada ~20 dias.</td></tr>
+        <tr><td class="mono">Resync</td><td>Não há reconciliação incremental. Fora de sincronia, o procedimento é apagar <code>messages.db</code> e <code>whatsapp.db</code> e parear de novo.</td></tr>
+        <tr><td class="mono">Windows</td><td><code>go-sqlite3</code> usa cgo: exige <code>CGO_ENABLED=1</code> e um compilador C instalado.</td></tr>
+        <tr><td class="mono">Eventos</td><td>O stream é best-effort e não persiste nada: assinante desconectado perde o que passou. Para reprocessar, a fonte de verdade é <code>messages.db</code> via <code>list_messages(after=…)</code>.</td></tr>
+        <tr><td class="mono">Configuração</td><td>Nenhuma. Porta, caminhos de banco e URL base são constantes no código, dos dois lados.</td></tr>
+        <tr><td class="mono">Testes</td><td>Um arquivo, <code>tests/test_mcp_structured_results.py</code>, cobrindo a serialização de dataclasses com a camada <code>whatsapp</code> mockada.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="riscos">
+  <h2>Arestas arquiteturais</h2>
+  <p class="sub">Achados da leitura do código, ordenados por consequência. Nenhum é bloqueante para uso pessoal; todos são bloqueantes para uso multiusuário.</p>
+  <div class="notes">
+
+    <div class="note">
+      <div class="sev sev-med">Exposição</div>
+      <p><strong>A API REST continua sem autenticação, agora restrita ao loopback.</strong> O bind passou de <code>":8080"</code> para <code>"127.0.0.1:8080"</code> junto com o stream de eventos — o que fecha o acesso de outros hosts da rede, mas não o de outros processos da sua máquina. Qualquer um deles pode ler <code>/api/events</code> e chamar <code>/api/send</code> como você. Um token compartilhado resolveria.</p>
+    </div>
+
+    <div class="note">
+      <div class="sev sev-high">Exfiltração</div>
+      <p><strong><code>send_file</code> aceita um caminho absoluto arbitrário vindo do modelo</strong> e o bridge o lê com <code>os.ReadFile</code> sem nenhuma restrição de diretório. Combinado com leitura de mensagens (conteúdo não confiável) e envio para fora, é exatamente a <em>lethal trifecta</em> que o README sinaliza. Um allowlist de diretórios fecharia o caso.</p>
+    </div>
+
+    <div class="note">
+      <div class="sev sev-med">Contrato</div>
+      <p><strong>A tool <code>list_messages</code> não devolve o que sua assinatura promete.</strong> <code>whatsapp.py::list_messages</code> é anotada <code>-&gt; List[Message]</code> mas retorna a string de <code>format_messages_list()</code>; <code>_serializable()</code> repassa strings intactas, então o agente recebe texto formatado onde o schema MCP declara <code>List[Dict]</code>. O mesmo vale para <code>get_last_interaction</code>. O teste existente não pega isso porque mocka a camada inteira.</p>
+    </div>
+
+    <div class="note">
+      <div class="sev sev-med">Desempenho</div>
+      <p><strong>N+1 no caminho mais usado.</strong> Com <code>include_context=True</code> (padrão), cada mensagem retornada dispara um <code>get_message_context</code> — que abre uma conexão SQLite nova e roda três queries. Um <code>limit=20</code> vira 61 queries e 21 conexões. Uma window function resolveria em uma.</p>
+    </div>
+
+    <div class="note">
+      <div class="sev sev-low">Correção</div>
+      <p><strong>Dois joins e um filtro frágeis.</strong> <code>list_chats</code> e <code>get_chat</code> ligam a última mensagem por igualdade de timestamp (<code>chats.last_message_time = messages.timestamp</code>), o que duplica a linha quando duas mensagens colidem no mesmo instante; <code>get_direct_chat_by_contact</code> casa com <code>LIKE %numero%</code>, que pode acertar o contato errado quando um número é substring de outro.</p>
+    </div>
+
+    <div class="note">
+      <div class="sev sev-low">Evolução</div>
+      <p><strong>Sem migrations.</strong> O schema nasce de <code>CREATE TABLE IF NOT EXISTS</code>; qualquer coluna nova exige apagar o banco e refazer o history sync. É a razão pela qual o troubleshooting do README trata "apagar os dois <code>.db</code>" como procedimento padrão.</p>
+    </div>
+
+  </div>
+</section>
+
+<footer class="end">
+  <p>Documento gerado a partir da leitura do código em <span class="mono">lucasbrunialti/whatsapp-mcp</span> · branch <span class="mono">claude/project-architecture-html-yai8q9</span>. Contagens de linhas e schemas conferidos contra <span class="mono">main.go</span>, <span class="mono">whatsapp.py</span>, <span class="mono">main.py</span> e <span class="mono">audio.py</span>.</p>
+</footer>
+
+</div>

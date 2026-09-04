@@ -159,6 +159,29 @@ You can send various media types to your WhatsApp contacts:
 
 By default, just the metadata of the media is stored in the local database. The message will indicate that media was sent. To access this media you need to use the download_media tool which takes the `message_id` and `chat_jid` (which are shown when printing messages containing the meda), this downloads the media and then returns the file path which can be then opened or passed to another tool.
 
+### Real-time Event Stream
+
+The bridge publishes every incoming message on a Server-Sent Events endpoint, so an external process can react the moment a message arrives instead of polling the database.
+
+```bash
+curl -N http://localhost:8080/api/events
+```
+
+```
+: connected
+
+event: message
+id: 3EB0C767D26B8CC33F7A
+data: {"id":"3EB0C767D26B8CC33F7A","chat_jid":"5511999999999@s.whatsapp.net","chat_name":"Alice","sender":"5511999999999","content":"are you around?","timestamp":"2026-09-03T12:00:00Z","is_from_me":false}
+```
+
+- **`GET /api/events`** — streams one `message` event per ingested message. Pass `?include_from_me=true` to also receive your own messages; they are withheld by default so an automation reacting to the stream doesn't fire on the echo of what it just sent.
+- Only live messages are streamed. History sync stores its messages through a separate path, so pairing a new device does not replay your whole archive onto open connections.
+- Any number of clients can listen at once. A client that stops reading falls behind by at most 64 events and then starts missing them — delivery is best-effort, and the SQLite database remains the source of truth.
+- Idle connections receive a `: keepalive` comment every 25 seconds.
+
+The REST API binds to `127.0.0.1` and has no authentication: any process on your machine can read this stream and send messages as you. Do not expose the port to other hosts.
+
 ## Technical Details
 
 1. Claude sends requests to the Python MCP server
