@@ -82,8 +82,14 @@ func (store *MessageStore) EnsureChat(jid, name string, lastMessageTime time.Tim
 	return err
 }
 
+// deletedMessagePlaceholder is the content of a tombstone: a message deleted
+// before the bridge stored it. Readers that do not know about the deletion
+// columns still render something meaningful instead of an empty message.
+const deletedMessagePlaceholder = "[deleted message]"
+
 // DeletedMessage is what is known about a message after it was marked as
-// deleted. Content is empty when the bridge never stored the original.
+// deleted. Content is deletedMessagePlaceholder when the bridge never stored
+// the original.
 type DeletedMessage struct {
 	ID        string
 	ChatJID   string
@@ -96,20 +102,20 @@ type DeletedMessage struct {
 }
 
 // MarkMessageDeleted flags a message as deleted, keeping its content. When the
-// original was never stored (sent before the bridge ran, or dropped), an empty
+// original was never stored (sent before the bridge ran, or dropped), a
 // tombstone row is created so the deletion still shows up in the chat.
 // "Delete for everyone" is never downgraded by a later "delete for me".
 func (store *MessageStore) MarkMessageDeleted(id, chatJID, sender string, timestamp time.Time, isFromMe bool, deletion MessageDeletion) (DeletedMessage, error) {
 	_, err := store.db.Exec(
 		`INSERT INTO messages
 		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, deleted_at, deleted_by, delete_scope)
-		VALUES (?, ?, ?, '', ?, ?, '', '', ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, '', '', ?, ?, ?)
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			deleted_at = excluded.deleted_at,
 			deleted_by = excluded.deleted_by,
 			delete_scope = excluded.delete_scope
 		WHERE messages.delete_scope IS NULL OR messages.delete_scope != ?`,
-		id, chatJID, sender, timestamp, isFromMe, deletion.DeletedAt, deletion.DeletedBy, deletion.Scope, DeleteScopeEveryone,
+		id, chatJID, sender, deletedMessagePlaceholder, timestamp, isFromMe, deletion.DeletedAt, deletion.DeletedBy, deletion.Scope, DeleteScopeEveryone,
 	)
 	if err != nil {
 		return DeletedMessage{}, err

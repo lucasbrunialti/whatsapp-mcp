@@ -109,8 +109,8 @@ func TestMarkMessageDeletedCreatesTombstoneForUnknownMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if deleted.Content != "" || deleted.Sender != "5511999999999" {
-		t.Fatalf("tombstone = %+v, want empty content from the original sender", deleted)
+	if deleted.Content != deletedMessagePlaceholder || deleted.Sender != "5511999999999" {
+		t.Fatalf("tombstone = %+v, want the placeholder from the original sender", deleted)
 	}
 	if got, _ := store.GetMessageDeletion("never-seen", chatJID); got == nil {
 		t.Fatal("tombstone is not marked as deleted")

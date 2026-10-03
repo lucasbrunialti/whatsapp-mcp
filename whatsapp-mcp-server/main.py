@@ -61,6 +61,11 @@ def list_messages(
     context_after: int = 1
 ) -> List[Dict[str, Any]]:
     """Get WhatsApp messages matching specified criteria with optional context.
+
+    Deleted messages are still returned with their original content. Check
+    deleted_at, deleted_by and delete_scope (everyone, me, chat, chat_cleared)
+    before acting on a message: a deleted quote or confirmation may no longer
+    hold.
     
     Args:
         after: Optional ISO-8601 formatted string to only return messages after this date

@@ -20,6 +20,15 @@ class Message:
     id: str
     chat_name: Optional[str] = None
     media_type: Optional[str] = None
+    # Set when the message was deleted in WhatsApp. The content is kept, so an
+    # agent can still see what was said and take the deletion into account.
+    deleted_at: Optional[datetime] = None
+    deleted_by: Optional[str] = None
+    delete_scope: Optional[str] = None  # everyone, me, chat or chat_cleared
+
+    @property
+    def is_deleted(self) -> bool:
+        return self.deleted_at is not None
 
 @dataclass
 class Chat:
@@ -46,6 +55,47 @@ class MessageContext:
     message: Message
     before: List[Message]
     after: List[Message]
+
+def _parse_timestamp(value) -> Optional[datetime]:
+    if value is None or isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value).replace(" ", "T", 1))
+
+
+def _message_columns(cursor, alias: str) -> str:
+    """Columns selected for a Message, in the order _row_to_message expects.
+
+    The deletion columns are added by the bridge on startup. Fall back to NULL
+    so the MCP server keeps working against a database the bridge has not
+    migrated yet.
+    """
+    cursor.execute("PRAGMA table_info(messages)")
+    existing = {row[1] for row in cursor.fetchall()}
+    deletion = ", ".join(
+        f"{alias}.{column}" if column in existing else "NULL"
+        for column in ("deleted_at", "deleted_by", "delete_scope")
+    )
+    return (
+        f"{alias}.timestamp, {alias}.sender, chats.name, {alias}.content, {alias}.is_from_me, "
+        f"chats.jid, {alias}.id, {alias}.media_type, {deletion}"
+    )
+
+
+def _row_to_message(row) -> Message:
+    return Message(
+        timestamp=_parse_timestamp(row[0]),
+        sender=row[1],
+        chat_name=row[2],
+        content=row[3],
+        is_from_me=row[4],
+        chat_jid=row[5],
+        id=row[6],
+        media_type=row[7],
+        deleted_at=_parse_timestamp(row[8]),
+        deleted_by=row[9],
+        delete_scope=row[10],
+    )
+
 
 def get_sender_name(sender_jid: str) -> str:
     try:
@@ -91,6 +141,29 @@ def get_sender_name(sender_jid: str) -> str:
         if 'conn' in locals():
             conn.close()
 
+DELETE_SCOPE_LABELS = {
+    "everyone": "deleted for everyone",
+    "me": "deleted for me",
+    "chat": "chat deleted",
+    "chat_cleared": "chat cleared",
+}
+
+
+def describe_deletion(message: Message) -> str:
+    """Render how a message was deleted, e.g. "deleted for everyone by João at ..."."""
+    label = DELETE_SCOPE_LABELS.get(message.delete_scope, "deleted")
+    by_me = message.delete_scope in ("me", "chat", "chat_cleared") or (
+        message.is_from_me and message.deleted_by == message.sender
+    )
+    if by_me:
+        deleted_by = "Me"
+    elif message.deleted_by:
+        deleted_by = get_sender_name(message.deleted_by)
+    else:
+        deleted_by = "unknown"
+    return f"{label} by {deleted_by} at {message.deleted_at:%Y-%m-%d %H:%M:%S}"
+
+
 def format_message(message: Message, show_chat_info: bool = True) -> None:
     """Print a single message with consistent formatting."""
     output = ""
@@ -101,8 +174,10 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
         output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] "
         
     content_prefix = ""
+    if getattr(message, 'deleted_at', None):
+        content_prefix += f"[{describe_deletion(message)}] "
     if hasattr(message, 'media_type') and message.media_type:
-        content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
+        content_prefix += f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
     
     try:
         sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
@@ -139,7 +214,7 @@ def list_messages(
         cursor = conn.cursor()
         
         # Build base query
-        query_parts = ["SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages"]
+        query_parts = [f"SELECT {_message_columns(cursor, 'messages')} FROM messages"]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
         where_clauses = []
         params = []
@@ -187,19 +262,7 @@ def list_messages(
         cursor.execute(" ".join(query_parts), tuple(params))
         messages = cursor.fetchall()
         
-        result = []
-        for msg in messages:
-            message = Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7]
-            )
-            result.append(message)
+        result = [_row_to_message(msg) for msg in messages]
             
         if include_context and result:
             # Add context for each message
@@ -233,8 +296,9 @@ def get_message_context(
         cursor = conn.cursor()
         
         # Get the target message first
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
+        columns = _message_columns(cursor, "messages")
+        cursor.execute(f"""
+            SELECT {columns}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.id = ?
@@ -244,62 +308,35 @@ def get_message_context(
         if not msg_data:
             raise ValueError(f"Message with ID {message_id} not found")
             
-        target_message = Message(
-            timestamp=datetime.fromisoformat(msg_data[0]),
-            sender=msg_data[1],
-            chat_name=msg_data[2],
-            content=msg_data[3],
-            is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
-            id=msg_data[6],
-            media_type=msg_data[8]
-        )
+        target_message = _row_to_message(msg_data)
         
         # Get messages before
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
+        cursor.execute(f"""
+            SELECT {columns}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp < ?
             ORDER BY messages.timestamp DESC
             LIMIT ?
-        """, (msg_data[7], msg_data[0], before))
+        """, (msg_data[5], msg_data[0], before))
         
         before_messages = []
         for msg in cursor.fetchall():
-            before_messages.append(Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7]
-            ))
+            before_messages.append(_row_to_message(msg))
         
         # Get messages after
-        cursor.execute("""
-            SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
+        cursor.execute(f"""
+            SELECT {columns}
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp > ?
             ORDER BY messages.timestamp ASC
             LIMIT ?
-        """, (msg_data[7], msg_data[0], after))
+        """, (msg_data[5], msg_data[0], after))
         
         after_messages = []
         for msg in cursor.fetchall():
-            after_messages.append(Message(
-                timestamp=datetime.fromisoformat(msg[0]),
-                sender=msg[1],
-                chat_name=msg[2],
-                content=msg[3],
-                is_from_me=msg[4],
-                chat_jid=msg[5],
-                id=msg[6],
-                media_type=msg[7]
-            ))
+            after_messages.append(_row_to_message(msg))
         
         return MessageContext(
             message=target_message,
@@ -488,19 +525,11 @@ def get_last_interaction(jid: str) -> str:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
         
-        cursor.execute("""
-            SELECT 
-                m.timestamp,
-                m.sender,
-                c.name,
-                m.content,
-                m.is_from_me,
-                c.jid,
-                m.id,
-                m.media_type
+        cursor.execute(f"""
+            SELECT {_message_columns(cursor, "m")}
             FROM messages m
-            JOIN chats c ON m.chat_jid = c.jid
-            WHERE m.sender = ? OR c.jid = ?
+            JOIN chats ON m.chat_jid = chats.jid
+            WHERE m.sender = ? OR chats.jid = ?
             ORDER BY m.timestamp DESC
             LIMIT 1
         """, (jid, jid))
@@ -510,17 +539,8 @@ def get_last_interaction(jid: str) -> str:
         if not msg_data:
             return None
             
-        message = Message(
-            timestamp=datetime.fromisoformat(msg_data[0]),
-            sender=msg_data[1],
-            chat_name=msg_data[2],
-            content=msg_data[3],
-            is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
-            id=msg_data[6],
-            media_type=msg_data[7]
-        )
-        
+        message = _row_to_message(msg_data)
+
         return format_message(message)
         
     except sqlite3.Error as e:
