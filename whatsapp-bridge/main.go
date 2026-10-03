@@ -14,7 +14,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,7 +32,6 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // Message represents a chat message for our client
@@ -175,171 +173,6 @@ func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 	}
 
 	return chats, nil
-}
-
-func joinMessageText(parts ...string) string {
-	var text []string
-	for _, part := range parts {
-		if trimmed := strings.TrimSpace(part); trimmed != "" {
-			text = append(text, trimmed)
-		}
-	}
-	return strings.Join(text, "\n")
-}
-
-// Business templates can nest (template -> HSM -> hydrated template -> ...).
-// Bound traversal so a malformed or cyclic payload cannot exhaust the stack.
-const maxBusinessMessageDepth = 8
-
-func extractHydratedTemplateText(template *waProto.TemplateMessage_HydratedFourRowTemplate) string {
-	if template == nil {
-		return ""
-	}
-	return joinMessageText(
-		template.GetHydratedTitleText(),
-		template.GetHydratedContentText(),
-		template.GetHydratedFooterText(),
-	)
-}
-
-func extractInteractiveMessageText(message *waProto.InteractiveMessage, depth int) string {
-	if message == nil || depth > maxBusinessMessageDepth {
-		return ""
-	}
-	parts := []string{
-		message.GetHeader().GetTitle(),
-		message.GetHeader().GetSubtitle(),
-		message.GetBody().GetText(),
-		message.GetFooter().GetText(),
-	}
-	for _, card := range message.GetCarouselMessage().GetCards() {
-		parts = append(parts, extractInteractiveMessageText(card, depth+1))
-	}
-	return joinMessageText(parts...)
-}
-
-func extractTemplateMessageText(template *waProto.TemplateMessage, depth int) string {
-	if template == nil || depth > maxBusinessMessageDepth {
-		return ""
-	}
-	if text := extractHydratedTemplateText(template.GetHydratedTemplate()); text != "" {
-		return text
-	}
-	if text := extractHydratedTemplateText(template.GetHydratedFourRowTemplate()); text != "" {
-		return text
-	}
-	if text := extractInteractiveMessageText(template.GetInteractiveMessageTemplate(), depth+1); text != "" {
-		return text
-	}
-	if fourRow := template.GetFourRowTemplate(); fourRow != nil {
-		return joinMessageText(
-			extractHighlyStructuredMessageText(fourRow.GetHighlyStructuredMessage(), depth+1),
-			extractHighlyStructuredMessageText(fourRow.GetContent(), depth+1),
-			extractHighlyStructuredMessageText(fourRow.GetFooter(), depth+1),
-		)
-	}
-	return ""
-}
-
-func formatLocalizableParam(param *waProto.HighlyStructuredMessage_HSMLocalizableParameter) string {
-	if param == nil {
-		return ""
-	}
-	if value := strings.TrimSpace(param.GetDefault()); value != "" {
-		return value
-	}
-	if currency := param.GetCurrency(); currency != nil {
-		return strings.TrimSpace(fmt.Sprintf("%s %.2f", currency.GetCurrencyCode(), float64(currency.GetAmount1000())/1000))
-	}
-	if dateTime := param.GetDateTime(); dateTime != nil {
-		if epoch := dateTime.GetUnixEpoch(); epoch != nil {
-			return time.Unix(epoch.GetTimestamp(), 0).UTC().Format("2006-01-02 15:04 UTC")
-		}
-		if c := dateTime.GetComponent(); c != nil {
-			return fmt.Sprintf("%04d-%02d-%02d %02d:%02d", c.GetYear(), c.GetMonth(), c.GetDayOfMonth(), c.GetHour(), c.GetMinute())
-		}
-	}
-	return ""
-}
-
-func extractHighlyStructuredMessageText(message *waProto.HighlyStructuredMessage, depth int) string {
-	if message == nil || depth > maxBusinessMessageDepth {
-		return ""
-	}
-	if text := extractTemplateMessageText(message.GetHydratedHsm(), depth+1); text != "" {
-		return text
-	}
-
-	label := "[business template]"
-	if name := strings.TrimSpace(message.GetElementName()); name != "" {
-		label = fmt.Sprintf("[business template: %s]", name)
-	}
-	parts := []string{label}
-	parts = append(parts, message.GetParams()...)
-	for _, param := range message.GetLocalizableParams() {
-		parts = append(parts, formatLocalizableParam(param))
-	}
-	return joinMessageText(parts...)
-}
-
-// populatedMessageFields lists the proto fields set on a message, sorted for
-// stable logs. Unknown field numbers are reported too, since fields newer than
-// the pinned descriptors have no name.
-func populatedMessageFields(message *waProto.Message) []string {
-	if message == nil {
-		return nil
-	}
-	var fields []string
-	reflected := message.ProtoReflect()
-	reflected.Range(func(field protoreflect.FieldDescriptor, _ protoreflect.Value) bool {
-		fields = append(fields, string(field.Name()))
-		return true
-	})
-	if unknown := reflected.GetUnknown(); len(unknown) > 0 {
-		fields = append(fields, fmt.Sprintf("unknown(%d bytes)", len(unknown)))
-	}
-	sort.Strings(fields)
-	return fields
-}
-
-// logDroppedMessage records why a message was not stored, so new WhatsApp
-// envelopes are discoverable instead of silently disappearing.
-func logDroppedMessage(logger waLog.Logger, id, chatJID string, message *waProto.Message) {
-	logger.Warnf(
-		"Dropping message %s in %s: no text or media extracted; populated fields: %s",
-		id,
-		chatJID,
-		strings.Join(populatedMessageFields(message), ", "),
-	)
-}
-
-// Extract text content from a message
-func extractTextContent(msg *waProto.Message) string {
-	if msg == nil {
-		return ""
-	}
-
-	// Try to get text content
-	if text := msg.GetConversation(); text != "" {
-		return text
-	} else if extendedText := msg.GetExtendedTextMessage(); extendedText != nil {
-		return extendedText.GetText()
-	}
-
-	if text := extractTemplateMessageText(msg.GetTemplateMessage(), 0); text != "" {
-		return text
-	}
-
-	if text := extractHighlyStructuredMessageText(msg.GetHighlyStructuredMessage(), 0); text != "" {
-		return text
-	}
-
-	if text := extractInteractiveMessageText(msg.GetInteractiveMessage(), 0); text != "" {
-		return text
-	}
-
-	// For now, we're ignoring other non-text messages
-	return ""
 }
 
 // SendMessageResponse represents the response for the send message API
@@ -532,6 +365,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 
 // Extract media info from a message
 func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
+	msg = unwrapMessage(msg)
 	if msg == nil {
 		return "", "", "", nil, nil, nil, 0
 	}
@@ -542,8 +376,12 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
 	}
 
-	// Check for video message
-	if vid := msg.GetVideoMessage(); vid != nil {
+	// Check for video message (round video notes arrive as PTV messages)
+	vid := msg.GetVideoMessage()
+	if vid == nil {
+		vid = msg.GetPtvMessage()
+	}
+	if vid != nil {
 		return "video", "video_" + time.Now().Format("20060102_150405") + ".mp4",
 			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
 	}
@@ -562,6 +400,17 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 		}
 		return "document", filename,
 			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
+	}
+
+	// Check for sticker message
+	if sticker := msg.GetStickerMessage(); sticker != nil {
+		return "sticker", "sticker_" + time.Now().Format("20060102_150405") + ".webp",
+			sticker.GetURL(), sticker.GetMediaKey(), sticker.GetFileSHA256(), sticker.GetFileEncSHA256(), sticker.GetFileLength()
+	}
+
+	// Business messages can carry an attachment in their header
+	if header := businessHeaderMedia(msg); header != nil {
+		return extractMediaInfo(header)
 	}
 
 	return "", "", "", nil, nil, nil, 0
@@ -794,7 +643,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	// Create a downloader that implements DownloadableMessage
 	var waMediaType whatsmeow.MediaType
 	switch mediaType {
-	case "image":
+	case "image", "sticker":
 		waMediaType = whatsmeow.MediaImage
 	case "video":
 		waMediaType = whatsmeow.MediaVideo
@@ -1352,6 +1201,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 	fmt.Printf("Received history sync event with %d conversations\n", len(historySync.Data.Conversations))
 
 	syncedCount := 0
+	dropped := droppedMessageTally{}
 	for _, conversation := range historySync.Data.Conversations {
 		// Parse JID from the conversation
 		if conversation.ID == nil {
@@ -1395,8 +1245,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					continue
 				}
 
-				// Extract text content using the same path as live messages, so
-				// business templates are not dropped during history sync.
+				// Extract text content using the same path as live messages. It
+				// also unwraps envelopes (disappearing messages, view once) that
+				// whatsmeow only removes from live messages.
 				content := extractTextContent(msg.Message.Message)
 
 				// Extract media info
@@ -1414,7 +1265,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				// Skip messages with no content and no media
 				if content == "" && mediaType == "" {
 					if msg.Message.Message != nil {
-						logDroppedMessage(logger, msg.Message.GetKey().GetID(), chatJID, msg.Message.Message)
+						dropped.add(logger, msg.Message.GetKey().GetID(), chatJID, msg.Message.Message)
 					}
 					continue
 				}
@@ -1484,6 +1335,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 	}
 
 	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
+	if len(dropped) > 0 {
+		logger.Warnf("History sync dropped messages with no text or media, by populated fields: %s", dropped.summary())
+	}
 }
 
 // Request history sync from the server
