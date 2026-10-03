@@ -62,8 +62,18 @@ func NewMessageStore() (*MessageStore, error) {
 		return nil, fmt.Errorf("failed to open message database: %v", err)
 	}
 
-	// Create tables if they don't exist
-	_, err = db.Exec(`
+	if err := initMessageSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	return &MessageStore{db: db}, nil
+}
+
+// initMessageSchema creates the tables if they don't exist and adds columns
+// introduced after the original schema.
+func initMessageSchema(db *sql.DB) error {
+	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS chats (
 			jid TEXT PRIMARY KEY,
 			name TEXT,
@@ -89,11 +99,9 @@ func NewMessageStore() (*MessageStore, error) {
 		);
 	`)
 	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to create tables: %v", err)
+		return fmt.Errorf("failed to create tables: %v", err)
 	}
-
-	return &MessageStore{db: db}, nil
+	return migrateDeletionColumns(db)
 }
 
 // Close the database connection
@@ -118,10 +126,24 @@ func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, tim
 		return nil
 	}
 
+	// Upsert instead of INSERT OR REPLACE: a replace would wipe the deletion
+	// columns whenever history sync stores the same message again.
 	_, err := store.db.Exec(
-		`INSERT OR REPLACE INTO messages 
-		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO messages
+		(id, chat_jid, sender, content, timestamp, is_from_me, media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id, chat_jid) DO UPDATE SET
+			sender = excluded.sender,
+			content = excluded.content,
+			timestamp = excluded.timestamp,
+			is_from_me = excluded.is_from_me,
+			media_type = excluded.media_type,
+			filename = excluded.filename,
+			url = excluded.url,
+			media_key = excluded.media_key,
+			file_sha256 = excluded.file_sha256,
+			file_enc_sha256 = excluded.file_enc_sha256,
+			file_length = excluded.file_length`,
 		id, chatJID, sender, content, timestamp, isFromMe, mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
 	)
 	return err
@@ -173,23 +195,6 @@ func (store *MessageStore) GetChats() (map[string]time.Time, error) {
 	}
 
 	return chats, nil
-}
-
-// Extract text content from a message
-func extractTextContent(msg *waProto.Message) string {
-	if msg == nil {
-		return ""
-	}
-
-	// Try to get text content
-	if text := msg.GetConversation(); text != "" {
-		return text
-	} else if extendedText := msg.GetExtendedTextMessage(); extendedText != nil {
-		return extendedText.GetText()
-	}
-
-	// For now, we're ignoring non-text messages
-	return ""
 }
 
 // SendMessageResponse represents the response for the send message API
@@ -382,6 +387,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 
 // Extract media info from a message
 func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, url string, mediaKey []byte, fileSHA256 []byte, fileEncSHA256 []byte, fileLength uint64) {
+	msg = unwrapMessage(msg)
 	if msg == nil {
 		return "", "", "", nil, nil, nil, 0
 	}
@@ -392,8 +398,12 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
 	}
 
-	// Check for video message
-	if vid := msg.GetVideoMessage(); vid != nil {
+	// Check for video message (round video notes arrive as PTV messages)
+	vid := msg.GetVideoMessage()
+	if vid == nil {
+		vid = msg.GetPtvMessage()
+	}
+	if vid != nil {
 		return "video", "video_" + time.Now().Format("20060102_150405") + ".mp4",
 			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
 	}
@@ -414,6 +424,17 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
 	}
 
+	// Check for sticker message
+	if sticker := msg.GetStickerMessage(); sticker != nil {
+		return "sticker", "sticker_" + time.Now().Format("20060102_150405") + ".webp",
+			sticker.GetURL(), sticker.GetMediaKey(), sticker.GetFileSHA256(), sticker.GetFileEncSHA256(), sticker.GetFileLength()
+	}
+
+	// Business messages can carry an attachment in their header
+	if header := businessHeaderMedia(msg); header != nil {
+		return extractMediaInfo(header)
+	}
+
 	return "", "", "", nil, nil, nil, 0
 }
 
@@ -425,6 +446,12 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, broker 
 
 	// Get appropriate chat name (pass nil for conversation since we don't have one for regular messages)
 	name := GetChatName(client, messageStore, msg.Info.Chat, chatJID, nil, sender, logger)
+
+	// A "delete for everyone" marks the original message instead of being
+	// stored as a message of its own.
+	if handleRevoke(client, messageStore, broker, msg, name, logger) {
+		return
+	}
 
 	// Update chat in database with the message timestamp (keeps last message time updated)
 	err := messageStore.StoreChat(chatJID, name, msg.Info.Timestamp)
@@ -438,8 +465,10 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, broker 
 	// Extract media info
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := extractMediaInfo(msg.Message)
 
-	// Skip if there's no content and no media
+	// Skip if there's no content and no media, but leave enough evidence to add
+	// support for new WhatsApp message envelopes instead of dropping them silently.
 	if content == "" && mediaType == "" {
+		logDroppedMessage(logger, msg.Info.ID, chatJID, msg.Message)
 		return
 	}
 
@@ -467,6 +496,7 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, broker 
 		// published: history sync stores its messages elsewhere, so pairing a
 		// new device does not replay the whole archive onto open streams.
 		broker.Publish(MessageEvent{
+			Type:      MessageEventTypeMessage,
 			ID:        msg.Info.ID,
 			ChatJID:   chatJID,
 			ChatName:  name,
@@ -642,7 +672,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	// Create a downloader that implements DownloadableMessage
 	var waMediaType whatsmeow.MediaType
 	switch mediaType {
-	case "image":
+	case "image", "sticker":
 		waMediaType = whatsmeow.MediaImage
 	case "video":
 		waMediaType = whatsmeow.MediaVideo
@@ -665,7 +695,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// Download the media using whatsmeow client
-	mediaData, err := client.Download(downloader)
+	mediaData, err := client.Download(context.Background(), downloader)
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
@@ -702,6 +732,9 @@ func extractDirectPathFromURL(url string) string {
 // MessageEvent is the payload published on the /api/events stream for every
 // message the bridge ingests in real time.
 type MessageEvent struct {
+	// Type is MessageEventTypeMessage for a new message, or
+	// MessageEventTypeDeleted when a message or chat was deleted.
+	Type      string    `json:"type"`
 	ID        string    `json:"id"`
 	ChatJID   string    `json:"chat_jid"`
 	ChatName  string    `json:"chat_name"`
@@ -711,6 +744,35 @@ type MessageEvent struct {
 	IsFromMe  bool      `json:"is_from_me"`
 	MediaType string    `json:"media_type,omitempty"`
 	Filename  string    `json:"filename,omitempty"`
+	// Deletion is set on deletion events. The other fields then describe the
+	// deleted message, with its original content when the bridge had it.
+	Deletion *MessageDeletion `json:"deletion,omitempty"`
+}
+
+const (
+	MessageEventTypeMessage = "message"
+	MessageEventTypeDeleted = "deleted"
+)
+
+// sseName is the SSE event name. Deletions use their own names so existing
+// clients listening for "message" do not mistake them for new messages.
+func (evt MessageEvent) sseName() string {
+	if evt.Deletion == nil {
+		return "message"
+	}
+	if evt.Deletion.Scope == DeleteScopeChat || evt.Deletion.Scope == DeleteScopeChatCleared {
+		return "chat_deleted"
+	}
+	return "message_deleted"
+}
+
+// fromMe reports whether the user caused the event: sent the message, or
+// performed the deletion.
+func (evt MessageEvent) fromMe() bool {
+	if evt.Deletion != nil {
+		return evt.Deletion.ByMe
+	}
+	return evt.IsFromMe
 }
 
 // eventBufferSize is how far a slow subscriber may fall behind before the
@@ -841,7 +903,7 @@ func newEventStreamHandler(broker *EventBroker) http.HandlerFunc {
 					return
 				}
 
-				if evt.IsFromMe && !includeFromMe {
+				if evt.fromMe() && !includeFromMe {
 					continue
 				}
 
@@ -851,7 +913,7 @@ func newEventStreamHandler(broker *EventBroker) http.HandlerFunc {
 					continue
 				}
 
-				fmt.Fprintf(w, "event: message\nid: %s\ndata: %s\n\n", evt.ID, payload)
+				fmt.Fprintf(w, "event: %s\nid: %s\ndata: %s\n\n", evt.sseName(), evt.ID, payload)
 				flusher.Flush()
 			}
 		}
@@ -987,14 +1049,14 @@ func main() {
 		return
 	}
 
-	container, err := sqlstore.New("sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
 	}
 
 	// Get device store - This contains session information
-	deviceStore, err := container.GetFirstDevice()
+	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// No device exists, create one
@@ -1030,6 +1092,15 @@ func main() {
 		case *events.Message:
 			// Process regular messages
 			handleMessage(client, messageStore, eventBroker, v, logger)
+
+		case *events.DeleteForMe:
+			handleDeleteForMe(client, messageStore, eventBroker, v, logger)
+
+		case *events.DeleteChat:
+			handleChatDeletion(client, messageStore, eventBroker, v.JID, v.Timestamp, DeleteScopeChat, logger)
+
+		case *events.ClearChat:
+			handleChatDeletion(client, messageStore, eventBroker, v.JID, v.Timestamp, DeleteScopeChatCleared, logger)
 
 		case *events.HistorySync:
 			// Process history sync events
@@ -1163,7 +1234,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 
 		// If we didn't get a name, try group info
 		if name == "" {
-			groupInfo, err := client.GetGroupInfo(jid)
+			groupInfo, err := client.GetGroupInfo(context.Background(), jid)
 			if err == nil && groupInfo.Name != "" {
 				name = groupInfo.Name
 			} else {
@@ -1178,7 +1249,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		logger.Infof("Getting name for contact: %s", chatJID)
 
 		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(jid)
+		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
 		if err == nil && contact.FullName != "" {
 			name = contact.FullName
 		} else if sender != "" {
@@ -1200,6 +1271,8 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 	fmt.Printf("Received history sync event with %d conversations\n", len(historySync.Data.Conversations))
 
 	syncedCount := 0
+	dropped := droppedMessageTally{}
+	revokedCount := 0
 	for _, conversation := range historySync.Data.Conversations {
 		// Parse JID from the conversation
 		if conversation.ID == nil {
@@ -1243,15 +1316,19 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					continue
 				}
 
-				// Extract text content
-				var content string
-				if msg.Message.Message != nil {
-					if conv := msg.Message.Message.GetConversation(); conv != "" {
-						content = conv
-					} else if ext := msg.Message.Message.GetExtendedTextMessage(); ext != nil {
-						content = ext.GetText()
+				// Messages deleted for everyone before the sync arrive as a
+				// stub with no content. Record the deletion.
+				if msg.Message.GetMessageStubType() == waProto.WebMessageInfo_REVOKE {
+					if recordHistoryRevoke(client, messageStore, msg.Message, jid, logger) {
+						revokedCount++
 					}
+					continue
 				}
+
+				// Extract text content using the same path as live messages. It
+				// also unwraps envelopes (disappearing messages, view once) that
+				// whatsmeow only removes from live messages.
+				content := extractTextContent(msg.Message.Message)
 
 				// Extract media info
 				var mediaType, filename, url string
@@ -1267,6 +1344,9 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 
 				// Skip messages with no content and no media
 				if content == "" && mediaType == "" {
+					if msg.Message.Message != nil {
+						dropped.add(logger, msg.Message.GetKey().GetID(), chatJID, msg.Message.Message)
+					}
 					continue
 				}
 
@@ -1334,7 +1414,10 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 		}
 	}
 
-	fmt.Printf("History sync complete. Stored %d messages.\n", syncedCount)
+	fmt.Printf("History sync complete. Stored %d messages, marked %d as deleted.\n", syncedCount, revokedCount)
+	if len(dropped) > 0 {
+		logger.Warnf("History sync dropped messages with no text or media, by populated fields: %s", dropped.summary())
+	}
 }
 
 // Request history sync from the server

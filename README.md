@@ -172,13 +172,33 @@ curl -N http://localhost:8080/api/events
 
 event: message
 id: 3EB0C767D26B8CC33F7A
-data: {"id":"3EB0C767D26B8CC33F7A","chat_jid":"5511999999999@s.whatsapp.net","chat_name":"Alice","sender":"5511999999999","content":"are you around?","timestamp":"2026-09-03T12:00:00Z","is_from_me":false}
+data: {"type":"message","id":"3EB0C767D26B8CC33F7A","chat_jid":"5511999999999@s.whatsapp.net","chat_name":"Alice","sender":"5511999999999","content":"are you around?","timestamp":"2026-09-03T12:00:00Z","is_from_me":false}
+
+event: message_deleted
+id: 3EB0C767D26B8CC33F7A
+data: {"type":"deleted","id":"3EB0C767D26B8CC33F7A","chat_jid":"5511999999999@s.whatsapp.net","chat_name":"Alice","sender":"5511999999999","content":"are you around?","timestamp":"2026-09-03T12:00:00Z","is_from_me":false,"deletion":{"deleted_at":"2026-09-03T12:05:00Z","deleted_by":"5511999999999","scope":"everyone","by_me":false}}
 ```
 
-- **`GET /api/events`** — streams one `message` event per ingested message. Pass `?include_from_me=true` to also receive your own messages; they are withheld by default so an automation reacting to the stream doesn't fire on the echo of what it just sent.
+- **`GET /api/events`** — streams one `message` event per ingested message, plus `message_deleted` and `chat_deleted` events (see [Deleted messages](#deleted-messages)). Clients that only want new messages should filter on the SSE event name or the `type` field. Pass `?include_from_me=true` to also receive your own messages; they are withheld by default so an automation reacting to the stream doesn't fire on the echo of what it just sent.
 - Only live messages are streamed. History sync stores its messages through a separate path, so pairing a new device does not replay your whole archive onto open connections.
 - Any number of clients can listen at once. A client that stops reading falls behind by at most 64 events and then starts missing them — delivery is best-effort, and the SQLite database remains the source of truth.
 - Idle connections receive a `: keepalive` comment every 25 seconds.
+
+### Deleted messages
+
+Deleting a message in WhatsApp never removes it from the local database. The message keeps its original content and is marked with when, by whom and how it was deleted, so an agent can take the deletion into account (for example, a supplier deleting the price they quoted).
+
+| `delete_scope` | Meaning |
+|---|---|
+| `everyone` | Deleted for everyone, by the sender or by a group admin (`deleted_by` tells which) |
+| `me` | Deleted for me on another of your devices |
+| `chat` | The whole chat was deleted on another of your devices |
+| `chat_cleared` | The chat was cleared on another of your devices |
+
+- The bridge adds the nullable `deleted_at`, `deleted_by` and `delete_scope` columns to `messages` on startup. Existing rows are untouched.
+- When the deleted message was never stored (sent before the bridge ran), a tombstone row with the content `[deleted message]` is created so the deletion still shows up in the chat.
+- The MCP tools return `deleted_at`, `deleted_by` and `delete_scope` with every message, and the rendered text is prefixed with, for example, `[deleted for everyone by Alice at 2026-09-03 12:05:00]`.
+- On the event stream, `message_deleted` carries the original message and a `deletion` object; `chat_deleted` carries the chat and the `deletion`. `include_from_me` applies to who performed the deletion.
 
 The REST API binds to `127.0.0.1` and has no authentication: any process on your machine can read this stream and send messages as you. Do not expose the port to other hosts.
 

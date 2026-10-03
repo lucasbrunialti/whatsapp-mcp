@@ -39,6 +39,9 @@ class MCPStructuredResultsTest(unittest.TestCase):
                     "id": "message-1",
                     "chat_name": None,
                     "media_type": None,
+                    "deleted_at": None,
+                    "deleted_by": None,
+                    "delete_scope": None,
                 }
             ],
         )
@@ -76,6 +79,76 @@ class MCPStructuredResultsTest(unittest.TestCase):
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].content, "Flávio entrou")
+        # A database the bridge has not migrated yet has no deletion columns.
+        self.assertIsNone(result[0].deleted_at)
+
+    def _deleted_message_db(self, path):
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            """
+            CREATE TABLE chats (jid TEXT PRIMARY KEY, name TEXT);
+            CREATE TABLE messages (
+                id TEXT,
+                chat_jid TEXT,
+                sender TEXT,
+                content TEXT,
+                timestamp TIMESTAMP,
+                is_from_me BOOLEAN,
+                media_type TEXT,
+                deleted_at TIMESTAMP,
+                deleted_by TEXT,
+                delete_scope TEXT,
+                PRIMARY KEY (id, chat_jid)
+            );
+            INSERT INTO chats VALUES ('5511999999999@s.whatsapp.net', 'Fornecedor');
+            INSERT INTO messages VALUES (
+                'before', '5511999999999@s.whatsapp.net', '5511999999999', 'Bom dia',
+                '2026-09-03 08:00:00+00:00', 0, '', NULL, NULL, NULL
+            );
+            INSERT INTO messages VALUES (
+                'deleted', '5511999999999@s.whatsapp.net', '5511999999999', 'Preço final: R$ 1.200',
+                '2026-09-03 09:00:00+00:00', 0, '',
+                '2026-09-03 10:00:00+00:00', '5511999999999', 'everyone'
+            );
+            """
+        )
+        connection.commit()
+        connection.close()
+
+    def test_list_messages_exposes_deletion_and_keeps_content(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as db_file:
+            self._deleted_message_db(db_file.name)
+            with patch.object(whatsapp, "MESSAGES_DB_PATH", db_file.name):
+                result = whatsapp.list_messages(
+                    chat_jid="5511999999999@s.whatsapp.net", include_context=False
+                )
+                structured = main.list_messages(
+                    chat_jid="5511999999999@s.whatsapp.net", include_context=False
+                )
+
+        deleted = next(message for message in result if message.id == "deleted")
+        self.assertEqual(deleted.content, "Preço final: R$ 1.200")
+        self.assertTrue(deleted.is_deleted)
+        self.assertEqual(deleted.delete_scope, "everyone")
+        self.assertEqual(deleted.deleted_by, "5511999999999")
+        self.assertEqual(deleted.deleted_at, datetime(2026, 9, 3, 10, 0, tzinfo=timezone.utc))
+        self.assertFalse(next(m for m in result if m.id == "before").is_deleted)
+
+        deleted_dict = next(message for message in structured if message["id"] == "deleted")
+        self.assertEqual(deleted_dict["deleted_at"], "2026-09-03T10:00:00+00:00")
+        self.assertEqual(deleted_dict["delete_scope"], "everyone")
+
+    def test_message_context_and_rendering_show_deletion(self):
+        with tempfile.NamedTemporaryFile(suffix=".db") as db_file:
+            self._deleted_message_db(db_file.name)
+            with patch.object(whatsapp, "MESSAGES_DB_PATH", db_file.name):
+                context = whatsapp.get_message_context("deleted", before=1, after=1)
+                rendered = whatsapp.format_message(context.message)
+
+        self.assertTrue(context.message.is_deleted)
+        self.assertEqual([m.id for m in context.before], ["before"])
+        self.assertIn("[deleted for everyone by Fornecedor at 2026-09-03 10:00:00]", rendered)
+        self.assertIn("Preço final: R$ 1.200", rendered)
 
 
 if __name__ == "__main__":
