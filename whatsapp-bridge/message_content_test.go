@@ -594,3 +594,11 @@ func TestDroppedMessageTallySummarizesUnexpectedEnvelopes(t *testing.T) {
 		t.Fatalf("tally.add() logged %d warnings, want 0 (one summary at the end instead)", len(logger.warnings))
 	}
 }
+
+func TestExtractDirectPathFromURLKeepsSignedQuery(t *testing.T) {
+	got := extractDirectPathFromURL("https://mmg.whatsapp.net/v/t62.7117-24/1_n.enc?ccb=11-4&oh=abc&oe=6A0B1C2D&_nc_sid=5e03e0")
+	want := "/v/t62.7117-24/1_n.enc?ccb=11-4&oh=abc&oe=6A0B1C2D&_nc_sid=5e03e0"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
