@@ -720,13 +720,9 @@ func extractDirectPathFromURL(url string) string {
 		return url // Return original URL if parsing fails
 	}
 
-	pathPart := parts[1]
-
-	// Remove query parameters
-	pathPart = strings.SplitN(pathPart, "?", 2)[0]
-
-	// Create proper direct path format
-	return "/" + pathPart
+	// Keep the query string: the oh/oe parameters sign the URL, and the CDN
+	// returns 403 without them. whatsmeow appends "&hash=..." to this path.
+	return "/" + parts[1]
 }
 
 // MessageEvent is the payload published on the /api/events stream for every
